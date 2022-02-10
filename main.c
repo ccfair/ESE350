@@ -14,15 +14,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <util/delay.h>
-#include "uart.h"
+#include "uart.h" //where to put this
 
 volatile int ovrflw = 0;
 volatile int falling = 1;
-volatile int ovrvar1 = 0;
-volatile int ovrvar2 = 0;
+volatile int rising_edge = 0;
+volatile int falling_edge = 0;
 volatile int diff = 0;
-volatile int period = 0;
+volatile long period = 0;
 volatile int addspace = 0;
+volatile int curr = 0;
 char morse[4];
 int inp[4] = {2, 2, 2, 2};
 
@@ -41,9 +42,9 @@ void Initialize()
 	TCCR1B &= ~(1<<WGM12);
 	TCCR1B &= ~(1<<WGM13);
 	
-	//Enable clock at 16MHz with (clkio/8 prescaling)
-	TCCR1B &= ~(1<<CS10); //0
-	TCCR1B |= (1<<CS11); //1
+	//Enable clock at 16MHz with (clkio/256 prescaling) ****
+	TCCR1B |= (1<<CS10); //1
+	TCCR1B &= ~(1<<CS11); //0
 	TCCR1B &= ~(1<<CS12); //0
 	
 	//Enable noise canceler for better button sensing
@@ -62,28 +63,61 @@ void Initialize()
 
 ISR(TIMER1_CAPT_vect)
 {
+	TIFR1 |= (1<<ICF1);
 	//Check if falling edge was found
 	if (falling == 1)
 	{
-		ovrvar1 = ICR1; //Store variable
-		falling = 0;
-		if ((ovrvar1 - ovrvar2) > 6250)
+		falling_edge = ICR1; //Store variable
+		period = (ovrflw*65536) + rising_edge - falling_edge; //16-bit timer counts to 65536
+		if (ovrflw > 6) // on space
 		{
-			addspace = 1;
+			char c = Classify(inp); //classify as a character
+			UART_putstring(c); //CONVERT CHAR to STR
+			// possibly reset strings?
+			curr = 0;
 		}
+		falling = 0;
+		ovrflw = 0;
 	}
 	else if (falling == 0) //Check if rising edge was found
 	{
-		ovrvar2 = ICR1; //Store variable
-		diff = ovrvar2 - ovrvar1;
+		rising_edge = ICR1; //Store variable
+		diff = falling_edge - rising_edge;
 		period = (ovrflw*65536) + diff;
+		
+		inp[curr] = isDash(period, ovrflw); //encode as dot or dash
+		curr++;
+		
+		if(curr > 3)
+			curr = 0; 
+		
 		falling = 1;
+		ovrflw = 0;
 	}
 	//Reset overflow counter
-	ovrflw = 0;
 	
 	//Toggle between rising edge and falling edge
 	TCCR1B ^= (1<<ICES1);
+}
+
+int isDash(long period, int overflow){
+	// Morse Math:
+	// Dot = 480000/8 = 30000
+	// Dash = 3200000/8 = 200000 -> 2 overflows
+	// Space = 400000 -> 6 overflows
+	
+	if(overflow > 1 && overflow <6){
+		return 1; //dash
+		PORTB = 0b10000000; //led flash
+	}
+	else if(overflow > 6){ //determine correct classification measure (overflow or period)
+		return 2; //space
+		PORTB = 0b00100000; //led flash
+	}
+	else{
+		return 0; //dot
+		PORTB = 0b01000000; //led flash
+	}
 }
 
 //Overflow interrupt to keep track of amount of times the Timer1 overflowed
@@ -200,6 +234,22 @@ int main(void)
 	
 	Initialize();
 	while(1)
-	{
-		
+	{ //consider X-ing all of this
+		//classify four successive presses into a len 4 array. end fill when space encountered.
+		DECODE:for(int i=0; i<4; i++){
+			//when interrupt is triggered, record period and overflow
+			inp[i] = isDash(period, ovrflw);
+			if(addspace==1){
+				period = 0;
+				ovrflw = 0;
+				goto DECODE;
+			}
+		}
+		//classify array with Classify() fn
+		str outputChar = (str)Classify(inp);
+
+		//spit out letters to Serial
+		UART_putstring(outputChar);
+		_delay_ms(300);
 	}
+}
